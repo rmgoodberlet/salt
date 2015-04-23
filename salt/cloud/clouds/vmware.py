@@ -749,32 +749,45 @@ def _upg_tools_helper(vm, queue, reboot=False):
     elif vm['guest.toolsStatus'] == "toolsOld":
         log.info('Upgrading VMware tools on {0}'.format(vm['name']))
         try:
-            if vm['guest.guestFamily'] == "windowsGuest" and not reboot:
+            if vm["guest.guestFamily"] == "windowsGuest" and not reboot:
                 log.info('Reboot suppressed on {0}'.format(vm.name))
                 task = vm_ref.UpgradeTools('/S /v"/qn REBOOT=R"')
-            elif vm['guest.guestFamily'] in ["linuxGuest", "windowsGuest"]:
+                _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
+                msg[vm['name']] = 'VMware tools successfully upgraded'
+		queue.put(msg, True)
+            else: 
                 task = vm_ref.UpgradeTools()
-            else:
-                msg[vm['name']] = 'Only Linux and Windows guests are currently supported'
-                queue.put(msg)
-            _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
+                _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
+                msg[vm['name']] = 'VMware tools successfully upgraded'
+		queue.put(msg, True)
+
         except Exception as exc:
-            log.error('Could not upgrade VMware tools on VM {0}: {1}'.format(vm['name'], exc))
-            msg[vm['name']] = 'VMware tools upgrade failed'
-            queue.put(msg)
-        msg[vm['name']] = 'VMware tools successfully upgraded'
-        queue.put(msg)
+	   log.debug('{0} {1}'.format(vm.name), exc)
+            try:
+                if vm["guest.guestFamily"] == "windowsGuest" and not reboot:
+                    log.info('Reboot suppressed on {0}'.format(vm.name))
+                    task = vm_ref.UpgradeTools('/S /v"/qn REBOOT=R"')
+                    _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
+                    msg[vm['name']] = 'VMware tools successfully upgraded'
+                    queue.put(msg, True)
+                else:
+                    task = vm_ref.UpgradeTools()
+                    _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
+                    msg[vm['name']] = 'VMware tools successfully upgraded'
+                    queue.put(msg, True)
+
+            except:
+                log.error('Could not upgrade VMware tools on VM {0}'.format(vm['name']))
+                pass
+
     else:
         msg[vm['name']] = 'Global Message 2'
         queue.put(msg)
-    log.debug('DEBUGGGG {0} {1} {2}'.format(msg[vm['name']], vm['guest.toolsStatus'], vm['name']))
     queue.put(msg)
-    #queue.put('{0} {1} {2}'.format(msg, vm['guest.toolsStatus'], vm['name']))
-    #return 
+    return 
 
 def _run_function_in_parallel(obj_list, function_name):
     queue = multiprocessing.Queue()
-    jobs = []
     ret = {}
     for obj in obj_list:
         p = multiprocessing.Process(
@@ -782,14 +795,14 @@ def _run_function_in_parallel(obj_list, function_name):
             args=(obj,queue,)
         )
         p.start()
-        ret[obj['name']] = value if key == obj['name'] else value for key,value in queue.get().iteritems()
-        continue
+	continue
 
- #   for obj in obj_list:
- #       #log.debug(queue.get())
- #       var = queue.get()
- #       for key, value in var.iteritems():
- #           ret[key] = value
+    for obj in obj_list:
+	while True:
+	    if obj['name'] in ret.keys():
+	        break
+	    else:
+	        ret.update(queue.get())
 
     return ret
 
