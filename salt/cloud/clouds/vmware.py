@@ -52,6 +52,7 @@ from re import match
 import pprint
 import logging
 import time
+import multiprocessing
 
 # Import salt libs
 import salt.utils.cloud
@@ -723,41 +724,74 @@ def _get_snapshots(snapshot_list, parent_snapshot_path=""):
     return snapshots
 
 
-def _upg_tools_helper(vm, reboot=False):
-    status = 'VMware tools could not be upgraded'
-    
-    # Exit if VMware tools is already up to date
-    if vm.guest.toolsStatus == "toolsOk":
-        status = 'VMware tools is already up to date'
-        return status
+def _upg_tools_helper(vm, queue, reboot=False):
+    vm_ref = vm["object"]
+    msg = {}
 
-    # Exit if VM is not powered on
-    if vm.summary.runtime.powerState != "poweredOn":
-        status = 'VM must be powered on to upgrade tools'
-        return status
+    if vm['config.template']:
+        msg[vm['name']] = 'VMware tools cannot be updated on a template'
+        queue.put(msg)
+
+    elif vm['guest.toolsStatus'] == "toolsOk":
+        msg[vm['name']] = 'VMware tools is already up to date'
+        queue.put(msg)
+
+    elif vm['summary.runtime.powerState'] != "poweredOn":
+        msg[vm['name']] = 'VM must be powered on to upgrade tools'
+        queue.put(msg)
+
+    elif vm['guest.toolsStatus'] in ["toolsNotRunning", "toolsNotInstalled"]:
+        msg[vm['name']] = 'VMware tools is either not running or not installed'
+        queue.put(msg)
 
     # If vmware tools is out of date, check major OS family
     # Upgrade tools on Linux and Windows guests
-    if vm.guest.toolsStatus == "toolsOld":
-        log.info('Upgrading VMware tools on {0}'.format(vm.name))
+    elif vm['guest.toolsStatus'] == "toolsOld":
+        log.info('Upgrading VMware tools on {0}'.format(vm['name']))
         try:
-            if vm.guest.guestFamily == "windowsGuest" and not reboot:
+            if vm['guest.guestFamily'] == "windowsGuest" and not reboot:
                 log.info('Reboot suppressed on {0}'.format(vm.name))
-                task = vm.UpgradeTools('/S /v"/qn REBOOT=R"')
-            elif vm.guest.guestFamily in ["linuxGuest", "windowsGuest"]:
-                task = vm.UpgradeTools()
+                task = vm_ref.UpgradeTools('/S /v"/qn REBOOT=R"')
+            elif vm['guest.guestFamily'] in ["linuxGuest", "windowsGuest"]:
+                task = vm_ref.UpgradeTools()
             else:
-                status = 'Only Linux and Windows guests are currently supported'
-                return status
-            _wait_for_task(task, vm.name, "tools upgrade", 5, "info")
+                msg[vm['name']] = 'Only Linux and Windows guests are currently supported'
+                queue.put(msg)
+            _wait_for_task(task, vm['name'], "tools upgrade", 5, "info")
         except Exception as exc:
-            log.error('Could not upgrade VMware tools on VM {0}: {1}'.format(vm.name, exc))
-            status = 'VMware tools upgrade failed'
-            return status
-        status = 'VMware tools upgrade succeeded'
-        return status
+            log.error('Could not upgrade VMware tools on VM {0}: {1}'.format(vm['name'], exc))
+            msg[vm['name']] = 'VMware tools upgrade failed'
+            queue.put(msg)
+        msg[vm['name']] = 'VMware tools successfully upgraded'
+        queue.put(msg)
+    else:
+        msg[vm['name']] = 'Global Message 2'
+        queue.put(msg)
+    log.debug('DEBUGGGG {0} {1} {2}'.format(msg[vm['name']], vm['guest.toolsStatus'], vm['name']))
+    queue.put(msg)
+    #queue.put('{0} {1} {2}'.format(msg, vm['guest.toolsStatus'], vm['name']))
+    #return 
 
-    return status
+def _run_function_in_parallel(obj_list, function_name):
+    queue = multiprocessing.Queue()
+    jobs = []
+    ret = {}
+    for obj in obj_list:
+        p = multiprocessing.Process(
+            target=function_name,
+            args=(obj,queue,)
+        )
+        p.start()
+        ret[obj['name']] = value if key == obj['name'] else value for key,value in queue.get().iteritems()
+        continue
+
+ #   for obj in obj_list:
+ #       #log.debug(queue.get())
+ #       var = queue.get()
+ #       for key, value in var.iteritems():
+ #           ret[key] = value
+
+    return ret
 
 
 def get_vcenter_version(kwargs=None, call=None):
@@ -1992,22 +2026,18 @@ def upgrade_tools_all(call=None):
         )
 
     vm_properties = [
-        "name"
+        "name",
+        "guest.toolsStatus",
+        "summary.runtime.powerState",
+        "guest.guestFamily",
+        "config.template"
     ]
 
-    # Create a list to store status information.
-    upg_status = []
     # Get list of vm objects from provider.
     vm_list = _get_mors_with_properties(vim.VirtualMachine, vm_properties)
+    ret = _run_function_in_parallel(vm_list, _upg_tools_helper)
 
-    # Call _upg_tools_helper function for each vm object
-    for object in vm_list:
-        vm = object['object']
-        status = _upg_tools_helper(vm)
-        # Append vm name and return status to upg_status list
-        upg_status.append(['{0}'.format(vm.name), '{0}'.format(status)])
-    
-    return { 'Tools Status' : upg_status }
+    return ret
 
 
 def upgrade_tools(name, reboot=False, call=None):
@@ -2032,9 +2062,9 @@ def upgrade_tools(name, reboot=False, call=None):
             'The upgrade_tools action must be called with -a or --action.'
         )
     # get vm object with provided name
-    vm = _get_mor_by_property(vim.VirtualMachine, name)
+    vm_ref = _get_mor_by_property(vim.VirtualMachine, name)
 
     # Call _upg_tools_helper function for vm
-    status = _upg_tools_helper(vm, reboot)
+    status = _upg_tools_helper(vm_ref, reboot)
 
     return { 'Tools Status' : status }
